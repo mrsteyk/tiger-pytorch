@@ -115,6 +115,8 @@ class Tiger(Optimizer):
                     # perhaps put in a group?
                     state['c'] = group.get('c', 0)
 
+                state['step'] += 1
+
                 exp_avg = state['exp_avg']
                 step = state['step']
                 c = state['c']
@@ -131,7 +133,5 @@ class Tiger(Optimizer):
                     self.grad_accum_steps,
                     c,
                 )
-
-                state['step'] += 1
 
         return loss
