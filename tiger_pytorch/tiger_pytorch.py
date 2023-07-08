@@ -1,20 +1,35 @@
-from typing import Tuple, Optional, Callable
+from typing import Optional, Callable
 
 import torch
 from torch.optim.optimizer import Optimizer
 
 # functions
 
+
 def exists(val):
     return val is not None
 
+
 # update functions
 
-def update_fn(p, grad, exp_avg, lr, wd, beta1, beta2, step, gas, s, c = 0):
+
+def update_fn(
+    p: torch.Tensor,
+    grad: torch.Tensor,
+    exp_avg: torch.Tensor,
+    lr: float,
+    wd: float,
+    beta1: float,
+    beta2: float,
+    step: int,
+    gas: int,
+    s: float,
+    c=0,
+):
     # _prepare
     # if step % gas != 0:
     #     beta1 = 1.
-    
+
     # this is really weird NaN circumvention
     is_nan = grad.isnan().any()
     # ok so now it's weird
@@ -28,7 +43,7 @@ def update_fn(p, grad, exp_avg, lr, wd, beta1, beta2, step, gas, s, c = 0):
     #     # In the end exp_avg doesn't get changed
     #     # beta1 is set to 1, exp_avg the same
     #     # beta2*grad, grad is 0, exp_avg the same
-    
+
     if is_nan:
         # Can this be simplified?
         # I am not doing it because fp16
@@ -39,15 +54,17 @@ def update_fn(p, grad, exp_avg, lr, wd, beta1, beta2, step, gas, s, c = 0):
         # we are done accumulating gradient
         if step % gas == 0:
             exp_avg.mul_(beta1)
-        exp_avg.add_(grad, alpha = beta2)
+        exp_avg.add_(grad, alpha=beta2)
         # u = (exp_avg.sign() + wd * p) * lr
         # p.sub_(u)
         # p - p * lr * wd
         # it is really weird that we are updating gradients even when doing accum
         p.data.mul_(1 - lr * wd)
-        p.add(exp_avg.sign(), alpha = -lr)
+        p.add(exp_avg.sign(), alpha=-lr)
+
 
 # class
+
 
 class Tiger(Optimizer):
     def __init__(
@@ -61,18 +78,14 @@ class Tiger(Optimizer):
         use_triton: bool = False,
         use_cuda: bool = False,
     ):
-        assert lr > 0.
-        assert 0. <= beta1 <= 1.
+        assert lr > 0.0
+        assert 0.0 <= beta1 <= 1.0
         assert grad_accum_steps >= 1
 
         # TODO: figure out how to change grad accum when reloading training
 
         beta2 = (1 - beta1) / grad_accum_steps
-        defaults = dict(
-            lr = lr,
-            betas = (beta1, beta2),
-            weight_decay = weight_decay
-        )
+        defaults = dict(lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
 
         super().__init__(params, defaults)
 
@@ -88,38 +101,40 @@ class Tiger(Optimizer):
         #     self.update_fn = triton_update_fn
 
     @torch.no_grad()
-    def step(
-        self,
-        closure: Optional[Callable] = None
-    ):
-
+    def step(self, closure: Optional[Callable] = None):
         loss = None
         if exists(closure):
             with torch.enable_grad():
                 loss = closure()
 
         for group in self.param_groups:
-            for p in filter(lambda p: exists(p.grad), group['params']):
+            for p in filter(lambda p: exists(p.grad), group["params"]):
                 # TODO: figure out if step is called when rem grad accum is not zero!
                 #       this is very important for this optimiser!
                 #       maybe fake grad accum?
 
-                grad, lr, wd, beta1, beta2, state = p.grad, group['lr'], group['weight_decay'], *group['betas'], self.state[p]
+                grad, lr, wd, beta1, beta2, state = (
+                    p.grad,
+                    group["lr"],
+                    group["weight_decay"],
+                    *group["betas"],
+                    self.state[p],
+                )
 
                 # init state - exponential moving average of gradient values
 
                 if len(state) == 0:
-                    state['exp_avg'] = torch.zeros_like(p)
-                    state['step'] = 0
+                    state["exp_avg"] = torch.zeros_like(p)
+                    state["step"] = 0
                     # should be different per parameter
                     # perhaps put in a group?
-                    state['c'] = group.get('c', 0)
+                    state["c"] = group.get("c", 0)
 
-                state['step'] += 1
+                state["step"] += 1
 
-                exp_avg = state['exp_avg']
-                step = state['step']
-                c = state['c']
+                exp_avg = state["exp_avg"]
+                step = state["step"]
+                c = state["c"]
 
                 self.update_fn(
                     p,
@@ -131,6 +146,7 @@ class Tiger(Optimizer):
                     beta2,
                     step,
                     self.grad_accum_steps,
+                    self.shrink_ratio,
                     c,
                 )
 
