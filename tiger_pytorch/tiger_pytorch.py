@@ -21,10 +21,9 @@ def update_fn(
     wd: float,
     beta1: float,
     beta2: float,
-    step: int,
-    gas: int,
-    s: float,
-    c=0,
+    grad_done: bool,
+    shrink_ratio: float,
+    c=0.0,
 ):
     # _prepare
     # if step % gas != 0:
@@ -48,17 +47,17 @@ def update_fn(
         # Can this be simplified?
         # I am not doing it because fp16
         p.sub_(c)
-        p.mul_(s)
+        p.mul_(shrink_ratio)
         p.add_(c)
     else:
         # we are done accumulating gradient
-        if step % gas == 0:
+        if grad_done:
             exp_avg.mul_(beta1)
         exp_avg.add_(grad, alpha=beta2)
         # u = (exp_avg.sign() + wd * p) * lr
         # p.sub_(u)
         # p - p * lr * wd
-        # it is really weird that we are updating gradients even when doing accum
+        # it is really weird that we are updating parameters even when doing accum
         p.data.mul_(1 - lr * wd)
         p.add(exp_avg.sign(), alpha=-lr)
 
@@ -79,13 +78,11 @@ class Tiger(Optimizer):
         use_cuda: bool = False,
     ):
         assert lr > 0.0
-        assert 0.0 <= beta1 <= 1.0
+        assert 0.0 < beta1 < 1.0
         assert grad_accum_steps >= 1
 
-        # TODO: figure out how to change grad accum when reloading training
-
         beta2 = (1 - beta1) / grad_accum_steps
-        defaults = dict(lr=lr, betas=(beta1, beta2), weight_decay=weight_decay)
+        defaults = dict(lr=lr, betas=(beta1, beta2), weight_decay=weight_decay, c=0.0)
 
         super().__init__(params, defaults)
 
@@ -93,12 +90,9 @@ class Tiger(Optimizer):
         self.grad_accum_steps = grad_accum_steps
         self.shrink_ratio = shrink_ratio
 
-        # Do pytorch optimisers have that?
-        # self.step_i = 0
-
-        # if use_triton:
-        #     from lion_pytorch.triton import update_fn as triton_update_fn
-        #     self.update_fn = triton_update_fn
+        if use_triton:
+            from tiger_pytorch.triton import update_fn as triton_update_fn
+            self.update_fn = triton_update_fn
 
     @torch.no_grad()
     def step(self, closure: Optional[Callable] = None):
@@ -109,16 +103,13 @@ class Tiger(Optimizer):
 
         for group in self.param_groups:
             for p in filter(lambda p: exists(p.grad), group["params"]):
-                # TODO: figure out if step is called when rem grad accum is not zero!
-                #       this is very important for this optimiser!
-                #       maybe fake grad accum?
-
-                grad, lr, wd, beta1, beta2, state = (
+                grad, lr, wd, beta1, beta2, state, c = (
                     p.grad,
                     group["lr"],
                     group["weight_decay"],
                     *group["betas"],
                     self.state[p],
+                    group["c"],
                 )
 
                 # init state - exponential moving average of gradient values
@@ -126,15 +117,11 @@ class Tiger(Optimizer):
                 if len(state) == 0:
                     state["exp_avg"] = torch.zeros_like(p)
                     state["step"] = 0
-                    # should be different per parameter
-                    # perhaps put in a group?
-                    state["c"] = group.get("c", 0)
 
                 state["step"] += 1
 
                 exp_avg = state["exp_avg"]
                 step = state["step"]
-                c = state["c"]
 
                 self.update_fn(
                     p,
@@ -144,8 +131,7 @@ class Tiger(Optimizer):
                     wd,
                     beta1,
                     beta2,
-                    step,
-                    self.grad_accum_steps,
+                    step % self.grad_accum_steps == 0,
                     self.shrink_ratio,
                     c,
                 )
