@@ -3,16 +3,8 @@ from typing import Optional, Callable
 import torch
 from torch.optim.optimizer import Optimizer
 
-# functions
 
-
-def exists(val):
-    return val is not None
-
-
-# update functions
-
-
+# update function
 def update_fn(
     p: torch.Tensor,
     grad: torch.Tensor,
@@ -25,24 +17,9 @@ def update_fn(
     shrink_ratio: float,
     c=0.0,
 ):
-    # _prepare
-    # if step % gas != 0:
-    #     beta1 = 1.
+    is_nan = grad.isnan().any()
 
     # this is really weird NaN circumvention
-    is_nan = grad.isnan().any()
-    # ok so now it's weird
-    # if not is_nan:
-    #     # exp_avg = beta1 * exp_avg + beta2 * grad
-    #     exp_avg.mul_(beta1).add_(grad, alpha = beta2)
-    # else:
-    #     beta1 = 1.
-    #     # why is this like that?
-    #     grad = torch.zeros_like(grad)
-    #     # In the end exp_avg doesn't get changed
-    #     # beta1 is set to 1, exp_avg the same
-    #     # beta2*grad, grad is 0, exp_avg the same
-
     if is_nan:
         # Can this be simplified?
         # I am not doing it because fp16
@@ -54,11 +31,8 @@ def update_fn(
         if grad_done:
             exp_avg.mul_(beta1)
         exp_avg.add_(grad, alpha=beta2)
-        # u = (exp_avg.sign() + wd * p) * lr
-        # p.sub_(u)
-        # p - p * lr * wd
         # it is really weird that we are updating parameters even when doing accum
-        p.data.mul_(1 - lr * wd)
+        p.mul_(1 - lr * wd)
         p.add(exp_avg.sign(), alpha=-lr)
 
 
@@ -92,17 +66,18 @@ class Tiger(Optimizer):
 
         if use_triton:
             from tiger_pytorch.triton import update_fn as triton_update_fn
+
             self.update_fn = triton_update_fn
 
     @torch.no_grad()
     def step(self, closure: Optional[Callable] = None):
         loss = None
-        if exists(closure):
+        if closure is not None:
             with torch.enable_grad():
                 loss = closure()
 
         for group in self.param_groups:
-            for p in filter(lambda p: exists(p.grad), group["params"]):
+            for p in [p for p in group["params"] if p.grad is not None]:
                 grad, lr, wd, beta1, beta2, state, c = (
                     p.grad,
                     group["lr"],
@@ -113,12 +88,9 @@ class Tiger(Optimizer):
                 )
 
                 # init state - exponential moving average of gradient values
-
                 if len(state) == 0:
                     state["exp_avg"] = torch.zeros_like(p)
                     state["step"] = 0
-
-                state["step"] += 1
 
                 exp_avg = state["exp_avg"]
                 step = state["step"]
@@ -131,9 +103,11 @@ class Tiger(Optimizer):
                     wd,
                     beta1,
                     beta2,
-                    step % self.grad_accum_steps == 0,
+                    step % self.grad_accum_steps == 0 and step != 0,
                     self.shrink_ratio,
                     c,
                 )
+
+                state["step"] += 1
 
         return loss
