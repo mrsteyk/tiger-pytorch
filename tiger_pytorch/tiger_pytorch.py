@@ -4,6 +4,10 @@ import torch
 from torch.optim.optimizer import Optimizer
 
 
+def rms(x: torch.Tensor):
+    return torch.sqrt(x.pow(2).mean())
+
+
 # update function
 def update_fn(
     p: torch.Tensor,
@@ -19,6 +23,8 @@ def update_fn(
 ):
     is_nan = grad.isnan().any()
 
+    # lr *= rms(p)
+
     # this is really weird NaN circumvention
     if is_nan:
         # Can this be simplified?
@@ -33,7 +39,7 @@ def update_fn(
         exp_avg.add_(grad, alpha=beta2)
         # it is really weird that we are updating parameters even when doing accum
         p.mul_(1 - lr * wd)
-        p.add(exp_avg.sign(), alpha=-lr)
+        p.add_(exp_avg.sign(), alpha=-lr)
 
 
 # class
@@ -103,7 +109,8 @@ class Tiger(Optimizer):
                     wd,
                     beta1,
                     beta2,
-                    step % self.grad_accum_steps == 0 and step != 0,
+                    self.grad_accum_steps == 1
+                    or (step % self.grad_accum_steps == 0 and step != 0),
                     self.shrink_ratio,
                     c,
                 )
